@@ -46,6 +46,16 @@ st.markdown("""
         margin: 10px 0;
     }
     
+    .regime-flat {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 10px;
+        border-radius: 10px;
+        text-align: center;
+        font-weight: bold;
+        margin: 10px 0;
+    }
+    
     .metric-container {
         background-color: #f8f9fa;
         padding: 15px;
@@ -76,22 +86,29 @@ def get_sp500_tickers():
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_regime_filter():
-    """Determine if S&P 500 is in uptrend or downtrend"""
+    """Determine if S&P 500 is in uptrend or downtrend based on price change"""
     try:
         spy = yf.Ticker("SPY")
-        hist = spy.history(period="6mo")
+        hist = spy.history(period="1mo")  # Get 1 month of data
         
-        hist['MA50'] = hist['Close'].rolling(window=50).mean()
-        hist['MA200'] = hist['Close'].rolling(window=200).mean()
+        if len(hist) < 2:
+            return "UNKNOWN"
         
-        latest_close = hist['Close'].iloc[-1]
-        latest_ma50 = hist['MA50'].iloc[-1]
-        latest_ma200 = hist['MA200'].iloc[-1]
+        # Get current price and previous day's price
+        current_price = hist['Close'].iloc[-1]
+        previous_price = hist['Close'].iloc[-2]
         
-        if latest_close > latest_ma50 > latest_ma200:
+        # Calculate daily change
+        daily_change = ((current_price - previous_price) / previous_price) * 100
+        
+        # Simple regime: UP if S&P 500 is positive today, DOWN if negative
+        if daily_change > 0:
             return "UP"
-        else:
+        elif daily_change < 0:
             return "DOWN"
+        else:
+            return "FLAT"
+            
     except Exception as e:
         st.error(f"Error calculating regime filter: {e}")
         return "UNKNOWN"
@@ -160,7 +177,7 @@ def main():
         
         auto_refresh = st.checkbox("Auto-refresh every 5 minutes", value=True)
         
-        num_stocks = st.slider("Number of stocks to display", min_value=10, max_value=100, value=50, step=10)
+        num_stocks = st.slider("Number of stocks to display", min_value=10, max_value=500, value=500, step=10)
         
         if st.button("🔄 Refresh Data", type="primary"):
             st.cache_data.clear()
@@ -184,14 +201,17 @@ def main():
     
     # Display regime indicator
     if regime == "UP":
-        st.markdown(f'<div class="regime-up">🟢 Market Regime: {regime} - Bullish Trend</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="regime-up">🟢 Market Regime: {regime} - S&P 500 UP Today</div>', unsafe_allow_html=True)
     elif regime == "DOWN":
-        st.markdown(f'<div class="regime-down">🔴 Market Regime: {regime} - Bearish Trend</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="regime-down">🔴 Market Regime: {regime} - S&P 500 DOWN Today</div>', unsafe_allow_html=True)
+    elif regime == "FLAT":
+        st.markdown(f'<div class="regime-flat">🟡 Market Regime: {regime} - S&P 500 Unchanged Today</div>', unsafe_allow_html=True)
     else:
         st.warning(f"⚠️ Market Regime: {regime}")
     
     # Get stock data
-    with st.spinner(f"Loading data for top {num_stocks} S&P 500 stocks... This may take a minute."):
+    estimated_time = max(1, num_stocks // 20)  # Rough estimate: 20 stocks per minute
+    with st.spinner(f"Loading data for {num_stocks} S&P 500 stocks... Estimated time: {estimated_time} minute{'s' if estimated_time > 1 else ''}"):
         tickers = get_sp500_tickers()
         
         # Progress bar
@@ -223,12 +243,11 @@ def main():
         # Convert to DataFrame
         df = pd.DataFrame(stock_data)
         
-        # Sort by absolute price change (most volatile first)
-        df['_abs_change'] = df['_price_change_num'].abs()
-        df_sorted = df.sort_values('_abs_change', ascending=False)
+        # Sort by 20-week rate of change (highest to lowest)
+        df_sorted = df.sort_values('_twenty_week_roc_num', ascending=False)
         
         # Remove helper columns before display
-        display_df = df_sorted.drop(['_price_change_num', '_twenty_week_roc_num', '_abs_change'], axis=1)
+        display_df = df_sorted.drop(['_price_change_num', '_twenty_week_roc_num'], axis=1)
         
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -249,7 +268,7 @@ def main():
             st.metric("Average Change", f"{avg_change:+.2f}%")
         
         # Display the data table
-        st.markdown("### 📊 Stock Data (Sorted by Daily Volatility)")
+        st.markdown("### 📊 Stock Data (Sorted by 20-Week Rate of Change)")
         
         # Style and display the dataframe
         styled_df = style_dataframe(display_df)

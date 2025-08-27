@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
-import requests
 
 # Page config
 st.set_page_config(
@@ -73,31 +72,16 @@ st.markdown("""
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def get_sp500_tickers():
-    """Get S&P 500 tickers from Wikipedia (with headers to avoid 403), fallback to a small list."""
+    """Get S&P 500 tickers from Wikipedia"""
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; sp500-tracker/1.0; +https://bradenfruin.github.io)",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        html = requests.get(url, headers=headers, timeout=15).text
-        tables = pd.read_html(html)
-        sp500_table = tables[0]          # first table = constituents
-        # column name can vary (Symbol / Ticker / Ticker symbol)
-        col = next((c for c in sp500_table.columns
-                    if str(c).strip().lower() in ("symbol", "ticker", "ticker symbol")), sp500_table.columns[0])
-        tickers = (
-            sp500_table[col]
-            .astype(str).str.strip().str.upper()
-            .str.replace(".", "-", regex=False)  # BRK.B -> BRK-B for Yahoo
-            .dropna().unique().tolist()
-        )
-        if tickers:
-            return tickers
-        raise ValueError("No tickers parsed from Wikipedia table.")
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        tables = pd.read_html(url)
+        sp500_table = tables[0]
+        tickers = sp500_table['Symbol'].tolist()
+        tickers = [ticker.replace('.', '-') for ticker in tickers]
+        return tickers
     except Exception as e:
         st.error(f"Error fetching S&P 500 tickers: {e}")
-        # Minimal fallback so the app still works
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ']
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -181,7 +165,7 @@ def style_dataframe(df):
             pass
         return ''
     
-    return df.style.map(color_negative_red, subset=['Price Change %', '20W ROC %'])
+    return df.style.applymap(color_negative_red, subset=['Price Change %', '20W ROC %'])
 
 def main():
     # Header
@@ -288,7 +272,7 @@ def main():
         
         # Style and display the dataframe
         styled_df = style_dataframe(display_df)
-        st.dataframe(styled_df, width='stretch', height=600)
+        st.dataframe(styled_df, width=None, height=600)
         
         # Download option
         csv = display_df.to_csv(index=False)

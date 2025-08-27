@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
+import random
+from requests.exceptions import RequestException
 
 # Page config
 st.set_page_config(
@@ -84,14 +86,31 @@ def get_sp500_tickers():
         st.error(f"Error fetching S&P 500 tickers: {e}")
         return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ']
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+def retry_with_backoff(func, max_retries=3, base_delay=1):
+    """Retry function with exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(delay)
+                    continue
+            raise e
+    return None
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes (increased from 5)
 def get_regime_filter():
     """Determine if S&P 500 is in uptrend or downtrend based on price change"""
-    try:
+    def _get_spy_data():
         spy = yf.Ticker("SPY")
-        hist = spy.history(period="1mo")  # Get 1 month of data
+        return spy.history(period="5d")  # Reduced from 1mo to 5d to minimize data
+    
+    try:
+        hist = retry_with_backoff(_get_spy_data)
         
-        if len(hist) < 2:
+        if hist is None or len(hist) < 2:
             return "UNKNOWN"
         
         # Get current price and previous day's price
@@ -102,41 +121,55 @@ def get_regime_filter():
         daily_change = ((current_price - previous_price) / previous_price) * 100
         
         # Simple regime: UP if S&P 500 is positive today, DOWN if negative
-        if daily_change > 0:
+        if daily_change > 0.1:
             return "UP"
-        elif daily_change < 0:
+        elif daily_change < -0.1:
             return "DOWN"
         else:
             return "FLAT"
             
     except Exception as e:
-        st.error(f"Error calculating regime filter: {e}")
+        st.warning(f"Unable to fetch market regime data. Using fallback. ({str(e)[:50]}...)")
         return "UNKNOWN"
 
 def get_stock_data(ticker):
-    """Get stock data for a single ticker"""
-    try:
+    """Get stock data for a single ticker with rate limiting protection"""
+    def _fetch_stock_data():
         stock = yf.Ticker(ticker)
-        info = stock.info
-        hist = stock.history(period="6mo")
+        # Get only essential data to reduce API calls
+        hist = stock.history(period="3mo")  # Reduced from 6mo
         
         if hist.empty:
+            return None, None
+            
+        # Try to get company name, but don't fail if we can't
+        try:
+            info = stock.info
+            company_name = info.get('longName', ticker)
+        except:
+            company_name = ticker
+            
+        return hist, company_name
+    
+    try:
+        hist, company_name = retry_with_backoff(_fetch_stock_data, max_retries=2, base_delay=0.5)
+        
+        if hist is None or hist.empty:
             return None
             
         current_price = hist['Close'].iloc[-1]
         prev_close = hist['Close'].iloc[-2] if len(hist) >= 2 else current_price
         pct_change = ((current_price - prev_close) / prev_close) * 100
         
-        twenty_week_data = hist.tail(100)
+        # Calculate 20-week data (approximately 100 trading days)
+        twenty_week_data = hist.tail(min(100, len(hist)))
         twenty_week_high = twenty_week_data['High'].max()
         
-        if len(twenty_week_data) >= 100:
+        if len(twenty_week_data) >= 50:  # Reduced threshold from 100 to 50
             twenty_week_old_price = twenty_week_data['Close'].iloc[0]
             twenty_week_roc = ((current_price - twenty_week_old_price) / twenty_week_old_price) * 100
         else:
             twenty_week_roc = 0
-        
-        company_name = info.get('longName', ticker)
         
         return {
             'Company': company_name,
@@ -177,7 +210,7 @@ def main():
         
         auto_refresh = st.checkbox("Auto-refresh every 5 minutes", value=True)
         
-        num_stocks = st.slider("Number of stocks to display", min_value=10, max_value=500, value=500, step=10)
+        num_stocks = st.slider("Number of stocks to display", min_value=10, max_value=500, value=50, step=10)
         
         if st.button("🔄 Refresh Data", type="primary"):
             st.cache_data.clear()
@@ -192,7 +225,10 @@ def main():
         - 20-week rate of change
         - Overall market regime (UP/DOWN)
         
-        Data refreshes automatically every 5 minutes.
+        **Rate Limiting Tips:**
+        - Start with 50 stocks or fewer to avoid rate limits
+        - Large requests (>100 stocks) may take several minutes
+        - Data refreshes automatically every 5 minutes
         """)
     
     # Get market regime
@@ -210,7 +246,7 @@ def main():
         st.warning(f"⚠️ Market Regime: {regime}")
     
     # Get stock data
-    estimated_time = max(1, num_stocks // 20)  # Rough estimate: 20 stocks per minute
+    estimated_time = max(1, num_stocks // 10)  # More conservative estimate: 10 stocks per minute
     with st.spinner(f"Loading data for {num_stocks} S&P 500 stocks... Estimated time: {estimated_time} minute{'s' if estimated_time > 1 else ''}"):
         tickers = get_sp500_tickers()
         
@@ -220,20 +256,36 @@ def main():
         
         stock_data = []
         failed_count = 0
+        consecutive_failures = 0
+        
+        # Add warning for large requests
+        if num_stocks > 100:
+            st.warning(f"⚠️ Loading {num_stocks} stocks may take several minutes and could hit rate limits. Consider using fewer stocks for faster results.")
         
         for i, ticker in enumerate(tickers[:num_stocks]):
-            status_text.text(f"Processing {ticker} ({i+1}/{num_stocks})...")
+            status_text.text(f"Processing {ticker} ({i+1}/{num_stocks})... Failed: {failed_count}")
             progress_bar.progress((i + 1) / num_stocks)
             
             data = get_stock_data(ticker)
             if data:
                 data['Regime'] = regime
                 stock_data.append(data)
+                consecutive_failures = 0  # Reset consecutive failures
             else:
                 failed_count += 1
+                consecutive_failures += 1
+                
+                # If we have too many consecutive failures, increase delay
+                if consecutive_failures >= 5:
+                    st.warning(f"Multiple consecutive failures detected. Increasing delay to avoid rate limiting...")
+                    time.sleep(2)
+                    consecutive_failures = 0
             
-            # Small delay to avoid rate limiting
-            time.sleep(0.05)
+            # Variable delay based on progress and failures
+            if failed_count > num_stocks * 0.1:  # If more than 10% failed
+                time.sleep(random.uniform(0.2, 0.5))  # Longer delay
+            else:
+                time.sleep(random.uniform(0.1, 0.2))  # Normal delay
         
         # Clear progress indicators
         progress_bar.empty()

@@ -165,7 +165,7 @@ def style_dataframe(df):
             pass
         return ''
     
-    return df.style.applymap(color_negative_red, subset=['Price Change %', '20W ROC %'])
+    return df.style.map(color_negative_red, subset=['Price Change %', '20W ROC %'])
 
 def main():
     # Header
@@ -181,7 +181,7 @@ def main():
         
         if st.button("🔄 Refresh Data", type="primary"):
             st.cache_data.clear()
-            st.experimental_rerun()
+            st.rerun()
         
         st.markdown("---")
         st.markdown("### 📊 About")
@@ -272,7 +272,7 @@ def main():
         
         # Style and display the dataframe
         styled_df = style_dataframe(display_df)
-        st.dataframe(styled_df, use_container_width=True, height=600)
+        st.dataframe(styled_df, width='stretch', height=600)
         
         # Download option
         csv = display_df.to_csv(index=False)
@@ -292,7 +292,7 @@ def main():
     # Auto-refresh logic
     if auto_refresh:
         time.sleep(300)  # Wait 5 minutes
-        st.experimental_rerun()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
